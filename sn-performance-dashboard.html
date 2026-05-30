@@ -1,0 +1,2192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ServiceNow Performance Analyst Dashboard — Suman M | LTIMindtree</title>
+
+<!--
+  ============================================================
+  ServiceNow Performance Analyst Dashboard v1.0.0
+  Author  : Suman M — Senior Software Engineer Consultant
+  Company : LTIMindtree
+  Stack   : Vanilla JS · Chart.js · Claude AI (Anthropic API)
+  Instance: ServiceNow PDI (Australia region — standardised ITSM modules)
+  Modules : ITSM Incident, Change, Problem, Knowledge Management
+  Routes  :
+    /engineering:incident-response   → MTTR & SLA compliance
+    /engineering:code-review         → Change success vs failure rates
+    /engineering:documentation       → KB utility & deflection
+    /engineering:architecture&debug  → Recurring problem records
+  ============================================================
+
+  EXECUTION OVERVIEW
+  ------------------
+  1. On DOMContentLoaded, DataLayer.init() bootstraps mock ServiceNow data
+     (mirrors the exact REST API field names from the SN Table API).
+  2. DashboardEngine.renderAll() drives all four engineering workflow panels
+     plus the global KPI cards.
+  3. ChartManager wraps every Chart.js instance so destroy() is called before
+     re-render — prevents "canvas already in use" errors.
+  4. AIEngine.analyze() calls the Anthropic v1/messages endpoint through a
+     configurable proxy URL (set AI_CONFIG.proxyEndpoint to your proxy server).
+  5. The polling interval is driven by AI_CONFIG.autoRefreshMs. When the proxy
+     is unavailable, a pre-computed fallback analysis is shown instead.
+
+  CONNECTING TO A LIVE PDI
+  ------------------------
+  1. Set SN_CONFIG.instanceUrl to your PDI URL:  https://dev-XXXXX.service-now.com
+  2. Set SN_CONFIG.username / password to your sn-dashboard-svc service account.
+  3. Set MOCK_MODE = false in DataLayer (line ~180).
+  4. Add your CORS rule in SN: System Web Services > REST API Explorer > CORS Rules.
+  5. Serve this file from the origin you registered in the CORS rule
+     (e.g. http://localhost:3000 via: python3 -m http.server 3000).
+
+  ANTHROPIC AI INTEGRATION
+  ------------------------
+  The AI Root Cause Analysis button calls AIEngine.analyze() which POSTs to
+  AI_CONFIG.proxyEndpoint. Run the companion proxy (server/proxy.js) to relay
+  the request to https://api.anthropic.com/v1/messages with your API key.
+  Never expose the API key in frontend JS.
+
+  GITHUB PAGES DEPLOYMENT
+  -----------------------
+  Push to main → .github/workflows/deploy.yml validates SN, lints, and deploys.
+  Dashboard is live at: https://yourusername.github.io/sn-servicenow-dashboard/
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
+<style>
+/* ─── DESIGN TOKENS ──────────────────────────────────────────────────────── */
+:root {
+  --c-bg:        #F7F8FC;
+  --c-surface:   #FFFFFF;
+  --c-surface2:  #F0F2F8;
+  --c-border:    #E4E8F0;
+  --c-text-1:    #0D1117;
+  --c-text-2:    #4A5568;
+  --c-text-3:    #8A94A6;
+
+  --c-blue:      #1A6FE8;
+  --c-blue-lt:   #EAF2FE;
+  --c-blue-dk:   #0D4AAB;
+  --c-green:     #16A34A;
+  --c-green-lt:  #DCFCE7;
+  --c-amber:     #D97706;
+  --c-amber-lt:  #FEF3C7;
+  --c-red:       #DC2626;
+  --c-red-lt:    #FEE2E2;
+  --c-purple:    #7C3AED;
+  --c-purple-lt: #EDE9FE;
+  --c-teal:      #0D9488;
+  --c-teal-lt:   #CCFBF1;
+
+  /* Chart palette — hardcoded for Chart.js (canvas can't read CSS vars) */
+  --chart-blue:   #1A6FE8;
+  --chart-green:  #16A34A;
+  --chart-amber:  #D97706;
+  --chart-red:    #DC2626;
+  --chart-purple: #7C3AED;
+  --chart-teal:   #0D9488;
+  --chart-gray:   #94A3B8;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.08);
+
+  --nav-w: 240px;
+  --font: 'DM Sans', sans-serif;
+  --font-mono: 'DM Mono', monospace;
+}
+
+/* ─── RESET & BASE ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; }
+body {
+  font-family: var(--font);
+  background: var(--c-bg);
+  color: var(--c-text-1);
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ─── SIDEBAR NAV ────────────────────────────────────────────────────────── */
+#sidebar {
+  width: var(--nav-w);
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0; left: 0;
+  height: 100vh;
+  z-index: 100;
+  overflow-y: auto;
+}
+.sidebar-brand {
+  padding: 20px 18px 16px;
+  border-bottom: 1px solid var(--c-border);
+}
+.brand-logo {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 6px;
+}
+.brand-icon {
+  width: 32px; height: 32px;
+  background: var(--c-blue);
+  border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+}
+.brand-icon svg { width: 18px; height: 18px; fill: white; }
+.brand-name { font-size: 14px; font-weight: 600; color: var(--c-text-1); }
+.brand-sub  { font-size: 11px; color: var(--c-text-3); letter-spacing: .3px; }
+.instance-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 10px;
+  padding: 3px 8px;
+  background: var(--c-green-lt);
+  border-radius: 20px;
+  font-size: 11px;
+  color: var(--c-green);
+  font-weight: 500;
+}
+.instance-badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--c-green);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; } 50% { opacity: .4; }
+}
+
+.nav-section-label {
+  padding: 14px 18px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--c-text-2);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: all .15s;
+  user-select: none;
+}
+.nav-item:hover { background: var(--c-surface2); color: var(--c-text-1); }
+.nav-item.active {
+  background: var(--c-blue-lt);
+  color: var(--c-blue);
+  font-weight: 500;
+  border-left-color: var(--c-blue);
+}
+.nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 14px 18px;
+  border-top: 1px solid var(--c-border);
+}
+.sidebar-footer-meta { font-size: 11px; color: var(--c-text-3); }
+.sidebar-footer-name { font-size: 12px; font-weight: 500; color: var(--c-text-2); margin-top: 2px; }
+
+/* ─── MAIN CONTENT ───────────────────────────────────────────────────────── */
+#main {
+  margin-left: var(--nav-w);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── TOPBAR ─────────────────────────────────────────────────────────────── */
+#topbar {
+  height: 56px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  display: flex; align-items: center;
+  padding: 0 24px;
+  gap: 12px;
+  position: sticky; top: 0; z-index: 90;
+}
+.topbar-title { font-size: 15px; font-weight: 600; flex: 1; }
+.topbar-route {
+  font-size: 11px;
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+}
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px; font-weight: 500;
+  cursor: pointer; border: none;
+  font-family: var(--font);
+  transition: all .15s;
+}
+.btn-primary {
+  background: var(--c-blue); color: white;
+}
+.btn-primary:hover { background: var(--c-blue-dk); }
+.btn-ghost {
+  background: var(--c-surface2); color: var(--c-text-2);
+  border: 1px solid var(--c-border);
+}
+.btn-ghost:hover { background: var(--c-border); }
+.last-updated {
+  font-size: 11px; color: var(--c-text-3);
+  font-family: var(--font-mono);
+}
+
+/* ─── PAGE CONTENT ───────────────────────────────────────────────────────── */
+#content {
+  padding: 24px;
+  flex: 1;
+}
+
+/* ─── OVERVIEW PAGE ──────────────────────────────────────────────────────── */
+.page { display: none; }
+.page.active { display: block; }
+
+.page-header { margin-bottom: 20px; }
+.page-header h1 { font-size: 20px; font-weight: 600; }
+.page-header p { font-size: 13px; color: var(--c-text-2); margin-top: 4px; }
+
+/* KPI Grid */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.kpi-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+}
+.kpi-label {
+  font-size: 11px; font-weight: 500;
+  color: var(--c-text-3);
+  text-transform: uppercase; letter-spacing: .5px;
+  margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.kpi-label svg { width: 13px; height: 13px; }
+.kpi-value { font-size: 26px; font-weight: 600; line-height: 1.1; }
+.kpi-delta {
+  margin-top: 6px; font-size: 11px;
+  display: flex; align-items: center; gap: 4px;
+}
+.delta-up   { color: var(--c-green); }
+.delta-down { color: var(--c-red); }
+.delta-neutral { color: var(--c-text-3); }
+
+/* Chart Cards */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.chart-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  box-shadow: var(--shadow-sm);
+}
+.chart-card-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.chart-card-title {
+  font-size: 13px; font-weight: 600; color: var(--c-text-1);
+}
+.chart-card-sub {
+  font-size: 11px; color: var(--c-text-3); margin-top: 2px;
+}
+.chart-legend {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-bottom: 10px;
+}
+.legend-item {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--c-text-2);
+}
+.legend-dot {
+  width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
+}
+
+/* SLA Bars */
+.sla-list { display: flex; flex-direction: column; gap: 12px; }
+.sla-row { display: flex; flex-direction: column; gap: 5px; }
+.sla-row-header {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px;
+}
+.sla-row-label { font-weight: 500; color: var(--c-text-1); }
+.sla-row-pct { font-family: var(--font-mono); font-size: 12px; }
+.sla-bar-bg {
+  height: 6px; background: var(--c-border);
+  border-radius: 3px; overflow: hidden;
+}
+.sla-bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width .6s ease;
+}
+
+/* Table */
+.data-table-wrap {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.data-table-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--c-border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.data-table-title { font-size: 13px; font-weight: 600; }
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.data-table th {
+  background: var(--c-surface2);
+  padding: 9px 14px;
+  text-align: left;
+  font-size: 11px; font-weight: 600;
+  color: var(--c-text-3);
+  text-transform: uppercase; letter-spacing: .4px;
+  border-bottom: 1px solid var(--c-border);
+}
+.data-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-1);
+  vertical-align: middle;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: var(--c-surface2); }
+
+/* Badges */
+.badge {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.badge-red    { background: var(--c-red-lt);    color: var(--c-red);    }
+.badge-amber  { background: var(--c-amber-lt);  color: var(--c-amber);  }
+.badge-green  { background: var(--c-green-lt);  color: var(--c-green);  }
+.badge-blue   { background: var(--c-blue-lt);   color: var(--c-blue);   }
+.badge-purple { background: var(--c-purple-lt); color: var(--c-purple); }
+.badge-teal   { background: var(--c-teal-lt);   color: var(--c-teal);   }
+
+/* Priority dots */
+.p-dot {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px;
+}
+.p-dot::before {
+  content: '';
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.p1::before { background: var(--c-red); }
+.p2::before { background: var(--c-amber); }
+.p3::before { background: var(--c-blue); }
+.p4::before { background: var(--c-text-3); }
+
+/* AI Panel */
+.ai-panel {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.ai-panel-header {
+  background: linear-gradient(135deg, #1A6FE8 0%, #7C3AED 100%);
+  padding: 16px 20px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.ai-panel-title {
+  color: white; font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.ai-icon {
+  width: 22px; height: 22px;
+  background: rgba(255,255,255,.2);
+  border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+}
+.ai-icon svg { width: 13px; height: 13px; fill: white; }
+.ai-badge {
+  padding: 2px 8px;
+  background: rgba(255,255,255,.2);
+  border-radius: 20px;
+  font-size: 10px; color: white; font-weight: 500;
+}
+.ai-body { padding: 20px; }
+.ai-output {
+  font-size: 13px; line-height: 1.7;
+  color: var(--c-text-2);
+  min-height: 60px;
+  white-space: pre-wrap;
+}
+.ai-loading {
+  display: none;
+  align-items: center; gap: 8px;
+  font-size: 12px; color: var(--c-text-3);
+}
+.ai-loading.visible { display: flex; }
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid var(--c-border);
+  border-top-color: var(--c-blue);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Grafana / Power BI embed placeholders */
+.embed-placeholder {
+  border: 1.5px dashed var(--c-border);
+  border-radius: var(--radius-md);
+  padding: 28px;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 8px; text-align: center;
+  background: var(--c-surface2);
+  color: var(--c-text-3);
+  font-size: 12px;
+}
+.embed-placeholder-icon { font-size: 28px; margin-bottom: 4px; }
+.embed-placeholder-label { font-weight: 600; font-size: 13px; color: var(--c-text-2); }
+
+/* Flow Designer row */
+.flow-list { display: flex; flex-direction: column; gap: 8px; }
+.flow-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: var(--c-surface2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+}
+.flow-item-name { font-size: 12px; font-weight: 500; flex: 1; }
+.flow-item-meta { font-size: 11px; color: var(--c-text-3); font-family: var(--font-mono); }
+
+/* Responsive tweaks */
+@media (max-width: 768px) {
+  :root { --nav-w: 0px; }
+  #sidebar { display: none; }
+  #main { margin-left: 0; }
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SIDEBAR NAVIGATION
+     Maps to the four /engineering:* workflow routes from the manual.
+     Each nav item sets window.currentRoute for topbar display.
+════════════════════════════════════════════════════════════════ -->
+<nav id="sidebar" role="navigation" aria-label="Dashboard navigation">
+
+  <div class="sidebar-brand">
+    <div class="brand-logo">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">SN Performance</div>
+        <div class="brand-sub">Analyst Dashboard v1.0</div>
+      </div>
+    </div>
+    <!-- Live PDI connection indicator — green when DataLayer can reach SN -->
+    <div class="instance-badge" id="instance-status">PDI Connected · AU Region</div>
+  </div>
+
+  <div class="nav-section-label">Overview</div>
+  <div class="nav-item active" data-page="overview" data-route="/dashboard:overview" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+    Overview
+  </div>
+
+  <div class="nav-section-label">Engineering Workflows</div>
+
+  <!--
+    /engineering:incident-response
+    Tracks MTTR (Mean Time To Resolution) and SLA compliance
+    across P1–P4 priority bands. Source table: incident.
+    Key fields: opened_at, resolved_at, sla_due, priority.
+  -->
+  <div class="nav-item" data-page="incident-response" data-route="/engineering:incident-response" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+    Incident Response
+  </div>
+
+  <!--
+    /engineering:code-review (Change Management)
+    Tracks change request outcomes — success, failure, rollback.
+    Source table: change_request. Key field: close_code.
+  -->
+  <div class="nav-item" data-page="code-review" data-route="/engineering:code-review" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+    Code Review / Changes
+  </div>
+
+  <!--
+    /engineering:documentation (Knowledge Base)
+    Tracks KB deflection rate and article utility.
+    Source table: kb_knowledge. Key fields: view_count, useful_count.
+  -->
+  <div class="nav-item" data-page="documentation" data-route="/engineering:documentation" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+    Documentation / KB
+  </div>
+
+  <!--
+    /engineering:architecture & debug (Problem Management)
+    Tracks recurring problem records linked to multiple incidents.
+    Source table: problem. Join: incident.problem_id.
+    State 107 = Closed (excluded from active list).
+  -->
+  <div class="nav-item" data-page="architecture" data-route="/engineering:architecture&debug" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>
+    Architecture &amp; Debug
+  </div>
+
+  <div class="nav-section-label">Integrations</div>
+  <div class="nav-item" data-page="integrations" data-route="/engineering:integrations" onclick="navigateTo(this)">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2l1.4 2.5L5 7zm12 9.8L17 14l1.4 2.5L17 19l2.5-1.4L22 19l-1.4-2.5L22 14zM22 2l-2.5 1.4L17 2l1.4 2.5L17 7l2.5-1.4L22 7l-1.4-2.5zm-7.63 5.29a1.007 1.007 0 0 0-1.41 0L1.29 18.96c-.39.39-.39 1.02 0 1.41l2.34 2.34c.39.39 1.02.39 1.41 0L16.7 11.05c.39-.39.39-1.02 0-1.41l-2.33-2.35zm-1.03 5.49l-2.12-2.12 2.44-2.44 2.12 2.12-2.44 2.44z"/></svg>
+    Grafana / Power BI
+  </div>
+
+  <div class="sidebar-footer">
+    <div class="sidebar-footer-meta">LTIMindtree · PDI AU</div>
+    <div class="sidebar-footer-name">Suman M — Senior Consultant</div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     MAIN LAYOUT
+════════════════════════════════════════════════════════════════ -->
+<div id="main">
+
+  <!-- Top Bar -->
+  <header id="topbar">
+    <div>
+      <div class="topbar-title" id="topbar-title">Dashboard Overview</div>
+      <div class="topbar-route" id="topbar-route">/dashboard:overview</div>
+    </div>
+    <div class="topbar-actions">
+      <span class="last-updated" id="last-updated">Refreshing…</span>
+      <button class="btn btn-ghost" onclick="DataLayer.refresh()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        Refresh
+      </button>
+      <button class="btn btn-primary" onclick="AIEngine.analyze()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+        AI Root Cause Analysis
+      </button>
+    </div>
+  </header>
+
+  <!-- Content Area -->
+  <main id="content" role="main">
+
+    <!-- ─── AI ROOT CAUSE ANALYSIS PANEL ─────────────────────────────────
+         Visible across all pages. Calls AIEngine.analyze() which POSTs
+         dashboard metrics to the Anthropic v1/messages endpoint via proxy.
+         Model: claude-sonnet-4-20250514 | max_tokens: 400
+    ──────────────────────────────────────────────────────────────────── -->
+    <div class="ai-panel">
+      <div class="ai-panel-header">
+        <div class="ai-panel-title">
+          <div class="ai-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+          </div>
+          AI Root Cause Analysis — Claude Sonnet (Anthropic)
+        </div>
+        <div class="ai-badge" id="ai-model-badge">claude-sonnet-4-20250514</div>
+      </div>
+      <div class="ai-body">
+        <div class="ai-loading" id="ai-loading">
+          <div class="spinner"></div>
+          Analysing ITSM metrics with Claude AI…
+        </div>
+        <div class="ai-output" id="ai-output">
+Click "AI Root Cause Analysis" to generate a live analysis powered by Claude Sonnet.
+The engine reads current MTTR, SLA compliance, change failure rates, and problem record
+trends, then synthesises actionable root cause insights across all four engineering workflows.
+
+Set AI_CONFIG.proxyEndpoint to your running proxy server to enable live API calls.
+Pre-computed fallback analysis is shown when the proxy is unreachable.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: OVERVIEW
+         Global KPI cards + mini-charts for all four workflows.
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-overview" class="page active">
+
+      <div class="page-header">
+        <h1>Platform Overview</h1>
+        <p>Aggregated ITSM metrics from ServiceNow PDI · Australia Region · Standardised modules only</p>
+      </div>
+
+      <!-- KPI Cards — driven by DataLayer.getKPIs() -->
+      <div class="kpi-grid" id="kpi-grid">
+        <!-- Populated by DashboardEngine.renderKPIs() -->
+      </div>
+
+      <!-- 2-column chart grid -->
+      <div class="chart-grid">
+
+        <!-- MTTR Trend (12-week rolling) -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">MTTR Trend — 12 Week Rolling</div>
+              <div class="chart-card-sub">Mean Time To Resolution by priority band (hours)</div>
+            </div>
+          </div>
+          <div class="chart-legend" id="mttr-legend"></div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-mttr" role="img" aria-label="MTTR trend over 12 weeks by priority band">MTTR trend data</canvas>
+          </div>
+        </div>
+
+        <!-- Change Outcomes Donut -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Change Outcomes — Rolling 30 Days</div>
+              <div class="chart-card-sub">Source table: change_request · field: close_code</div>
+            </div>
+          </div>
+          <div class="chart-legend" id="change-legend"></div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-change" role="img" aria-label="Change outcomes donut: success, rollback, failure">Change outcomes donut chart</canvas>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- SLA Compliance Bars -->
+      <div class="chart-grid">
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">SLA Compliance by Priority</div>
+              <div class="chart-card-sub">Thresholds from servicenow.config.js · green ≥ target, amber within 10%, red below</div>
+            </div>
+          </div>
+          <div class="sla-list" id="sla-list">
+            <!-- Populated by DashboardEngine.renderSLA() -->
+          </div>
+        </div>
+
+        <!-- KB Deflection Rate Bar Chart -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">KB Deflection Rate by Category</div>
+              <div class="chart-card-sub">useful_count / view_count × 100 · alert threshold: &lt;40% at &gt;500 views</div>
+            </div>
+          </div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-kb" role="img" aria-label="KB deflection rate bar chart by category">KB deflection rates</canvas>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /page-overview -->
+
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: /engineering:incident-response
+         MTTR deep-dive + active incident table sorted by SLA breach risk.
+         Source: incident table | sysparm_query: active=true^ORDERBYpriority
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-incident-response" class="page">
+
+      <div class="page-header">
+        <h1>Incident Response</h1>
+        <p><code style="font-family:var(--font-mono);font-size:11px;background:var(--c-surface2);padding:2px 6px;border-radius:3px;">/engineering:incident-response</code> · MTTR tracking, SLA compliance, breach risk queue</p>
+      </div>
+
+      <div class="kpi-grid" id="inc-kpi-grid"></div>
+
+      <div class="chart-grid">
+        <div class="chart-card" style="grid-column: span 2;">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Weekly MTTR by Priority Band</div>
+              <div class="chart-card-sub">SLA targets: P1=4h · P2=8h · P3=24h · P4=72h (configurable in servicenow.config.js)</div>
+            </div>
+          </div>
+          <div class="chart-legend" id="inc-mttr-legend"></div>
+          <div style="position:relative;height:260px;">
+            <canvas id="chart-inc-mttr" role="img" aria-label="Grouped bar chart of weekly MTTR by priority">MTTR by priority and week</canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrap">
+        <div class="data-table-header">
+          <div class="data-table-title">Active Incidents — Sorted by SLA Breach Risk</div>
+          <span class="badge badge-red" id="breach-count-badge">0 at risk</span>
+        </div>
+        <table class="data-table" id="incident-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Priority</th>
+              <th>Short Description</th>
+              <th>Assigned To</th>
+              <th>Opened</th>
+              <th>SLA Due</th>
+              <th>State</th>
+              <th>Breach Risk</th>
+            </tr>
+          </thead>
+          <tbody id="incident-tbody">
+          </tbody>
+        </table>
+      </div>
+    </div><!-- /page-incident-response -->
+
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: /engineering:code-review
+         Change management success/failure/rollback analysis.
+         Source: change_request table | close_code field
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-code-review" class="page">
+
+      <div class="page-header">
+        <h1>Code Review / Change Management</h1>
+        <p><code style="font-family:var(--font-mono);font-size:11px;background:var(--c-surface2);padding:2px 6px;border-radius:3px;">/engineering:code-review</code> · Change success rates, rollback analysis, risk distribution</p>
+      </div>
+
+      <div class="kpi-grid" id="cr-kpi-grid"></div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Change Outcomes Distribution</div>
+              <div class="chart-card-sub">close_code: "successful" / contains "rollback" / other</div>
+            </div>
+          </div>
+          <div class="chart-legend" id="cr-donut-legend"></div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-cr-donut" role="img" aria-label="Donut chart of change outcomes">Change outcomes donut</canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Change Volume by Risk Level</div>
+              <div class="chart-card-sub">Risk field from change_request · rolling 30 days</div>
+            </div>
+          </div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-cr-risk" role="img" aria-label="Bar chart of change volume by risk level">Change risk distribution</canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrap">
+        <div class="data-table-header">
+          <div class="data-table-title">Recent Change Requests — Last 30 Days</div>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Type</th>
+              <th>Risk</th>
+              <th>Description</th>
+              <th>Outcome</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="change-tbody"></tbody>
+        </table>
+      </div>
+    </div><!-- /page-code-review -->
+
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: /engineering:documentation
+         Knowledge Base utility & incident deflection analysis.
+         Source: kb_knowledge | view_count, useful_count, kb_category
+         Deflection = useful_count / view_count × 100
+         Alert: articles with view_count > 500 and deflection < 40%
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-documentation" class="page">
+
+      <div class="page-header">
+        <h1>Documentation / Knowledge Base</h1>
+        <p><code style="font-family:var(--font-mono);font-size:11px;background:var(--c-surface2);padding:2px 6px;border-radius:3px;">/engineering:documentation</code> · Deflection rate, article utility, low-utility alerts</p>
+      </div>
+
+      <div class="kpi-grid" id="kb-kpi-grid"></div>
+
+      <div class="chart-grid">
+        <div class="chart-card" style="grid-column: span 2;">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">KB Article Utility — View vs Useful Count</div>
+              <div class="chart-card-sub">Deflection rate = useful_count / view_count × 100 · dashed line = 40% alert threshold</div>
+            </div>
+          </div>
+          <div style="position:relative;height:260px;">
+            <canvas id="chart-kb-utility" role="img" aria-label="Scatter plot of KB article view count vs deflection rate">KB article utility scatter plot</canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrap">
+        <div class="data-table-header">
+          <div class="data-table-title">Knowledge Articles — Sorted by Deflection Rate</div>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Category</th>
+              <th>Short Description</th>
+              <th>Views</th>
+              <th>Useful</th>
+              <th>Deflection %</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="kb-tbody"></tbody>
+        </table>
+      </div>
+    </div><!-- /page-documentation -->
+
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: /engineering:architecture & debug
+         Problem Management — recurring systemic issues.
+         Source: problem table | join: incident.problem_id
+         State 101=Open, 102=RCA, 103=Fix, 104=Known Error, 107=Closed
+         Default query: state!=107 (excludes closed)
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-architecture" class="page">
+
+      <div class="page-header">
+        <h1>Architecture &amp; Debug</h1>
+        <p><code style="font-family:var(--font-mono);font-size:11px;background:var(--c-surface2);padding:2px 6px;border-radius:3px;">/engineering:architecture&amp;debug</code> · Recurring problems, systemic root causes, RCA pipeline</p>
+      </div>
+
+      <div class="kpi-grid" id="arch-kpi-grid"></div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Problem State Distribution</div>
+              <div class="chart-card-sub">SN state codes: 101=Open, 102=RCA, 103=Fix, 104=Known Error</div>
+            </div>
+          </div>
+          <div class="chart-legend" id="prob-state-legend"></div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-prob-state" role="img" aria-label="Donut chart of problem states">Problem state distribution</canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Linked Incidents per Problem</div>
+              <div class="chart-card-sub">Top 8 problems by incident volume (via problem_id join)</div>
+            </div>
+          </div>
+          <div style="position:relative;height:220px;">
+            <canvas id="chart-prob-incidents" role="img" aria-label="Horizontal bar chart of linked incidents per problem">Incidents per problem record</canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrap">
+        <div class="data-table-header">
+          <div class="data-table-title">Open Problem Records — State ≠ 107 (Closed)</div>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Number</th>
+              <th>Priority</th>
+              <th>State</th>
+              <th>Short Description</th>
+              <th>Linked Incidents</th>
+              <th>Cause Notes</th>
+            </tr>
+          </thead>
+          <tbody id="prob-tbody"></tbody>
+        </table>
+      </div>
+    </div><!-- /page-architecture -->
+
+
+    <!-- ══════════════════════════════════════════════════════════════
+         PAGE: Integrations (Grafana + Power BI)
+         Shows where embedded panels would be placed in production.
+         See manual Section 7 for full embedding instructions.
+    ═══════════════════════════════════════════════════════════════ -->
+    <div id="page-integrations" class="page">
+
+      <div class="page-header">
+        <h1>Grafana &amp; Power BI Integrations</h1>
+        <p>Embedding integration points — replace placeholder iframes with your Grafana panel share URLs or Power BI embed tokens.</p>
+      </div>
+
+      <div class="chart-grid">
+
+        <!-- Grafana Embed Point 1 -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Grafana Panel — Infrastructure CPU/Memory</div>
+              <div class="chart-card-sub">
+                Replace src with: https://grafana.your-org.com/d-solo/DASHBOARD_ID/PANEL_ID?orgId=1&amp;from=now-24h&amp;to=now&amp;theme=light
+              </div>
+            </div>
+            <span class="badge badge-amber">Not Connected</span>
+          </div>
+          <!--
+            GRAFANA INTEGRATION POINT
+            ─────────────────────────
+            Steps (see Section 7.1 of process manual):
+            1. In Grafana, open panel → Share → Embed tab → copy iframe src URL.
+            2. Ensure auth.anonymous.enabled = true in grafana.ini (or use signed embedding).
+            3. Replace the src attribute below with your copied URL.
+            4. For Prometheus → SN: alert webhook → SN REST API → IntegrationHub creates incident.
+
+            Production iframe (uncomment and replace src):
+            <iframe src="https://grafana.your-org.com/d-solo/..." width="100%" height="300"
+              frameborder="0" title="Grafana Infrastructure Panel"></iframe>
+          -->
+          <div class="embed-placeholder">
+            <div class="embed-placeholder-icon">📊</div>
+            <div class="embed-placeholder-label">Grafana Panel Embed Point</div>
+            <div>Configure grafana.ini → auth.anonymous.enabled = true<br>then replace this block with your panel iframe src URL.</div>
+          </div>
+          <div class="flow-list" style="margin-top:14px;">
+            <div class="flow-item">
+              <span class="badge badge-blue">Step 1</span>
+              <span class="flow-item-name">Grafana Panel → Share → Embed tab</span>
+              <span class="flow-item-meta">Copy iframe src</span>
+            </div>
+            <div class="flow-item">
+              <span class="badge badge-blue">Step 2</span>
+              <span class="flow-item-name">Paste src into iframe below SN data</span>
+              <span class="flow-item-meta">correlates infra to incidents</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Power BI Embed Point -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-card-title">Power BI — Executive ITSM Report</div>
+              <div class="chart-card-sub">
+                Requires powerbi-client SDK + Azure AD embed token from your backend.
+              </div>
+            </div>
+            <span class="badge badge-amber">Not Connected</span>
+          </div>
+          <!--
+            POWER BI INTEGRATION POINT
+            ──────────────────────────
+            Steps (see Section 7.2 of process manual):
+            1. In Power BI Service: File → Embed Report → Website or portal.
+            2. Copy the embed URL and Report ID.
+            3. npm install powerbi-client
+            4. Implement fetchEmbedToken() on your Azure AD backend
+               (service principal mints short-lived embed token — never use personal creds in JS).
+            5. Replace the placeholder div below with embedPowerBIReport(containerId, reportId).
+
+            Production code (uncomment):
+            import * as powerbi from 'powerbi-client';
+            const models = window.powerbi.models;
+            powerbi.embed(container, {
+              type: 'report', id: REPORT_ID,
+              embedUrl: 'https://app.powerbi.com/reportEmbed?reportId=...',
+              accessToken: token,
+              tokenType: models.TokenType.Embed,
+              settings: { panes: { filters: { visible: false } },
+                          background: models.BackgroundType.Transparent }
+            });
+          -->
+          <div class="embed-placeholder">
+            <div class="embed-placeholder-icon">📈</div>
+            <div class="embed-placeholder-label">Power BI Report Embed Point</div>
+            <div>Configure Azure AD service principal → mint embed token<br>then call embedPowerBIReport(containerId, reportId).</div>
+          </div>
+          <div class="flow-list" style="margin-top:14px;">
+            <div class="flow-item">
+              <span class="badge badge-purple">Step 1</span>
+              <span class="flow-item-name">PBI Service → File → Embed Report</span>
+              <span class="flow-item-meta">Copy Report ID</span>
+            </div>
+            <div class="flow-item">
+              <span class="badge badge-purple">Step 2</span>
+              <span class="flow-item-name">Azure AD backend mints embed token</span>
+              <span class="flow-item-meta">Never expose token in JS</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Flow Designer Active Workflows (mock) -->
+      <div class="data-table-wrap">
+        <div class="data-table-header">
+          <div class="data-table-title">Flow Designer — Active ITSM Workflows</div>
+          <span class="badge badge-green">IntegrationHub Active</span>
+        </div>
+        <div style="padding:16px;">
+          <div class="flow-list" id="flow-list"></div>
+        </div>
+      </div>
+
+    </div><!-- /page-integrations -->
+
+  </main>
+</div>
+
+<script>
+/*
+  ============================================================
+  MODULE 1: CONFIGURATION
+  ─────────────────────────────────────────────────────────────
+  All environment-specific settings live here. In production,
+  these values are read from environment variables injected by
+  the GitHub Actions runner or a Node.js server. In the browser,
+  set them directly or use a thin backend proxy.
+  ============================================================
+*/
+
+/**
+ * SN_CONFIG — ServiceNow PDI connection settings.
+ * Mirrors config/servicenow.config.js from the project structure.
+ *
+ * LIVE PDI SETUP:
+ * 1. Set instanceUrl to https://dev-XXXXX.service-now.com (Australia PDI).
+ * 2. Set username to "sn-dashboard-svc" (your service account, Section 1.4).
+ * 3. Set password to your service account password.
+ * 4. Set MOCK_MODE = false in DataLayer below.
+ *
+ * SLA thresholds match the out-of-box SN defaults for AU region.
+ * Customise p1_hours..p4_hours to match your organisation's SLAs.
+ */
+const SN_CONFIG = {
+  instanceUrl: 'https://dev-XXXXX.service-now.com',   // Replace with your PDI URL
+  username:    'sn-dashboard-svc',                      // Created in Section 1.4
+  password:    '',                                       // Set in .env — never hardcode
+  slaThresholds: {
+    p1_hours: 4,   // Critical — P1 SLA target
+    p2_hours: 8,   // High     — P2 SLA target
+    p3_hours: 24,  // Moderate — P3 SLA target
+    p4_hours: 72,  // Low      — P4 SLA target
+  },
+  pollIntervalSeconds: 60,  // How often sn-data-fetch.js writes snapshot.json
+};
+
+/**
+ * AI_CONFIG — Anthropic Claude API settings.
+ * Mirrors config/ai.config.js from the project structure.
+ *
+ * LIVE AI SETUP:
+ * 1. Run server/proxy.js (Express) which relays requests to api.anthropic.com.
+ * 2. Set proxyEndpoint to http://localhost:3001/api/analyze.
+ * 3. Set useRealAPI = true.
+ * 4. The proxy reads ANTHROPIC_API_KEY from its .env file — never in frontend JS.
+ *
+ * When useRealAPI is false OR the proxy is unreachable, FALLBACK_ANALYSIS
+ * is shown instead (see AIEngine.fallback below).
+ */
+const AI_CONFIG = {
+  model:           'claude-sonnet-4-20250514',      // Always use Sonnet 4 for dashboard
+  maxTokens:       400,
+  proxyEndpoint:   'http://localhost:3001/api/analyze',  // Your running proxy server
+  autoRefreshMs:   30 * 60 * 1000,                  // Auto-refresh every 30 minutes
+  useRealAPI:      false,                            // Set true when proxy is running
+};
+
+
+/*
+  ============================================================
+  MODULE 2: DATA LAYER
+  ─────────────────────────────────────────────────────────────
+  Abstracts data access. In MOCK_MODE=true, returns structured
+  mock data that uses the exact same field names as the live
+  ServiceNow REST API responses. Switch MOCK_MODE=false and
+  provide valid SN_CONFIG credentials to use live data.
+
+  Live API format mirrors:
+    GET /api/now/table/incident?sysparm_limit=50&sysparm_fields=...
+    Response: { result: [ { number, priority, opened_at, ... } ] }
+  ============================================================
+*/
+const DataLayer = (() => {
+
+  /*
+    MOCK_MODE flag.
+    ──────────────
+    true  → Use mock data (safe for demos, CI, offline dev).
+    false → Fetch live data from SN_CONFIG.instanceUrl.
+
+    To switch to live data:
+    1. Set MOCK_MODE = false (change the line below).
+    2. Ensure SN_CONFIG has valid credentials.
+    3. Confirm CORS rule exists in your PDI for your serving origin.
+    4. Run: python3 -m http.server 3000, then open http://localhost:3000.
+  */
+  const MOCK_MODE = true;
+
+  // ── Internal state ──────────────────────────────────────────────────────
+  let _data = null;   // Cached snapshot (matches shape of data/snapshot.json)
+  let _lastFetch = null;
+
+  // ── Mock data ────────────────────────────────────────────────────────────
+  // Field names mirror the SN Table API exactly so switching MOCK_MODE=false
+  // requires zero changes to the rendering code.
+  const MOCK = {
+
+    // ServiceNow: incident table
+    // sysparm_query: active=true^ORDERBYpriority
+    // sysparm_fields: number,priority,short_description,assigned_to,opened_at,sla_due,state
+    incidents: [
+      { number:'INC0010042', priority:'1', short_description:'Production DB cluster unresponsive — AU-PROD-01', assigned_to:'Priya Kumar',      opened_at:'2026-05-29T02:14:00Z', sla_due:'2026-05-29T06:14:00Z', state:'2', mttr_hours: 3.2 },
+      { number:'INC0010041', priority:'1', short_description:'Payment gateway 503 errors — spike 2:00 AM AEST', assigned_to:'Dev Rathore',      opened_at:'2026-05-29T01:55:00Z', sla_due:'2026-05-29T05:55:00Z', state:'2', mttr_hours: 4.8 },
+      { number:'INC0010039', priority:'2', short_description:'Email notification queue backed up >5000 messages', assigned_to:'Suman M',         opened_at:'2026-05-28T14:30:00Z', sla_due:'2026-05-28T22:30:00Z', state:'2', mttr_hours: 6.1 },
+      { number:'INC0010038', priority:'2', short_description:'MID Server heartbeat failure — AU-MID-02',         assigned_to:'Anjali Singh',     opened_at:'2026-05-28T11:00:00Z', sla_due:'2026-05-28T19:00:00Z', state:'3', mttr_hours: 7.4 },
+      { number:'INC0010035', priority:'3', short_description:'CMDB Discovery scan timeout on 3 CI records',      assigned_to:'Rahul Mehta',      opened_at:'2026-05-27T09:20:00Z', sla_due:'2026-05-28T09:20:00Z', state:'2', mttr_hours: 18.0 },
+      { number:'INC0010034', priority:'3', short_description:'Service Portal search widget not returning results',assigned_to:'Priya Kumar',      opened_at:'2026-05-27T08:45:00Z', sla_due:'2026-05-28T08:45:00Z', state:'2', mttr_hours: 20.5 },
+      { number:'INC0010030', priority:'3', short_description:'SLA breach alert firing on resolved incidents',    assigned_to:'Dev Rathore',      opened_at:'2026-05-26T16:00:00Z', sla_due:'2026-05-27T16:00:00Z', state:'1', mttr_hours: null },
+      { number:'INC0010028', priority:'4', short_description:'User profile picture upload limit too restrictive',assigned_to:'Anjali Singh',     opened_at:'2026-05-25T13:00:00Z', sla_due:'2026-05-28T13:00:00Z', state:'1', mttr_hours: null },
+      { number:'INC0010027', priority:'4', short_description:'Report scheduler missing timezone offset for AEST',assigned_to:'Rahul Mehta',      opened_at:'2026-05-25T10:30:00Z', sla_due:'2026-05-28T10:30:00Z', state:'2', mttr_hours: 35.0 },
+      { number:'INC0010025', priority:'2', short_description:'IntegrationHub flow failing on Slack spoke auth',  assigned_to:'Suman M',         opened_at:'2026-05-24T07:00:00Z', sla_due:'2026-05-24T15:00:00Z', state:'6', mttr_hours: 5.9 },
+    ],
+
+    // ServiceNow: change_request table
+    // sysparm_query: sys_created_on>=javascript:gs.beginningOfLast30Days()
+    // sysparm_fields: number,type,risk,close_code,short_description,sys_created_on
+    changes: [
+      { number:'CHG0001182', type:'Normal',    risk:'High',   close_code:'successful',          short_description:'Upgrade PostgreSQL 15 → 16 on AU-PROD-DB-01', sys_created_on:'2026-05-28' },
+      { number:'CHG0001181', type:'Normal',    risk:'High',   close_code:'unsuccessful_rollback',short_description:'Deploy microservice auth-svc v2.4.1',         sys_created_on:'2026-05-27' },
+      { number:'CHG0001180', type:'Standard',  risk:'Low',    close_code:'successful',          short_description:'Apply OS patch KB5034441 to 14 AU VMs',        sys_created_on:'2026-05-27' },
+      { number:'CHG0001179', type:'Emergency', risk:'High',   close_code:'successful',          short_description:'Emergency fix: payment gateway cert renewal',   sys_created_on:'2026-05-26' },
+      { number:'CHG0001178', type:'Normal',    risk:'Medium', close_code:'unsuccessful',        short_description:'Reconfigure CMDB Discovery schedule',           sys_created_on:'2026-05-25' },
+      { number:'CHG0001177', type:'Standard',  risk:'Low',    close_code:'successful',          short_description:'Update ServiceNow SLA definitions for P3/P4',   sys_created_on:'2026-05-24' },
+      { number:'CHG0001176', type:'Normal',    risk:'Medium', close_code:'successful',          short_description:'Migrate IntegrationHub flows to new workspace',  sys_created_on:'2026-05-23' },
+      { number:'CHG0001175', type:'Normal',    risk:'High',   close_code:'unsuccessful_rollback',short_description:'Deploy Flow Designer migration v3.1',          sys_created_on:'2026-05-22' },
+      { number:'CHG0001174', type:'Standard',  risk:'Low',    close_code:'successful',          short_description:'Add new SN group for AU region L2 support',     sys_created_on:'2026-05-21' },
+      { number:'CHG0001173', type:'Normal',    risk:'Medium', close_code:'successful',          short_description:'Refactor Business Rule: incident auto-assign',   sys_created_on:'2026-05-20' },
+    ],
+
+    // ServiceNow: problem table
+    // sysparm_query: state!=107
+    // sysparm_fields: number,short_description,state,cause_notes,priority
+    // Joined with incident table on problem_id to get linked_incident_count
+    problems: [
+      { number:'PRB0000412', priority:'1', state:'102', short_description:'DB cluster connection pool exhaustion under peak load', cause_notes:'Connection pool limit set too low; autoscaling not triggered below 90% CPU', linked_incidents: 7 },
+      { number:'PRB0000411', priority:'2', state:'103', short_description:'MID Server TLS handshake timeout on AU network segment',  cause_notes:'TLS 1.0 disabled on AU-MID-02; app still negotiating downgrade',         linked_incidents: 4 },
+      { number:'PRB0000409', priority:'2', state:'104', short_description:'IntegrationHub Slack spoke OAuth token refresh failure',   cause_notes:'Known issue: Slack API rate limit 429 not handled in spoke v3.0.1',       linked_incidents: 6 },
+      { number:'PRB0000407', priority:'3', state:'101', short_description:'CMDB CI data reconciliation drift after Discovery',        cause_notes:'Pending investigation — CI stale flag not reset post-scan',              linked_incidents: 3 },
+      { number:'PRB0000405', priority:'3', state:'102', short_description:'Service Portal search index out of sync',                  cause_notes:'Elastic index rebuild job failing silently on large KB payload',          linked_incidents: 2 },
+      { number:'PRB0000403', priority:'4', state:'101', short_description:'Report scheduler AEST timezone offset incorrect',          cause_notes:'Hardcoded UTC offset; AEST daylight saving not accounted for',            linked_incidents: 2 },
+    ],
+
+    // ServiceNow: kb_knowledge table
+    // sysparm_query: workflow_state=published
+    // sysparm_fields: number,short_description,view_count,useful_count,kb_category
+    kb_articles: [
+      { number:'KB0010231', short_description:'How to reset your ServiceNow password via SSO',             kb_category:'Access Management', view_count: 1240, useful_count: 980 },
+      { number:'KB0010218', short_description:'Requesting a new software licence — step-by-step guide',   kb_category:'Software',          view_count: 870,  useful_count: 720 },
+      { number:'KB0010205', short_description:'VPN connectivity troubleshooting for AU remote workers',   kb_category:'Network',           view_count: 650,  useful_count: 220 },
+      { number:'KB0010198', short_description:'ServiceNow CI/CD pipeline overview for dev team',          kb_category:'Development',       view_count: 540,  useful_count: 440 },
+      { number:'KB0010187', short_description:'CMDB Discovery — what it does and how often it runs',      kb_category:'CMDB',              view_count: 490,  useful_count: 380 },
+      { number:'KB0010175', short_description:'Email notification delivery troubleshooting guide',        kb_category:'Messaging',         view_count: 820,  useful_count: 290 },
+      { number:'KB0010162', short_description:'How to raise an emergency change request',                 kb_category:'Change Management', view_count: 310,  useful_count: 260 },
+      { number:'KB0010150', short_description:'IntegrationHub flow debugging — common error codes',       kb_category:'Development',       view_count: 420,  useful_count: 350 },
+    ],
+
+    // 12-week MTTR history (hours) by priority — for trend chart
+    // Populated by sn-data-fetch.js rolling window calculation
+    mttr_trend: {
+      weeks:    ['W18','W19','W20','W21','W22','W23','W24','W25','W26','W27','W28','W29'],
+      p1_hours: [5.2, 4.8, 6.1, 3.9, 5.5, 4.2, 3.8, 5.0, 4.6, 3.5, 4.9, 3.2],
+      p2_hours: [7.8, 8.2, 7.1, 9.0, 6.8, 7.5, 8.1, 7.3, 6.9, 7.8, 7.2, 6.1],
+      p3_hours: [21,  23,  19,  25,  22,  20,  24,  21,  18,  22,  20,  18],
+      p4_hours: [55,  62,  48,  70,  58,  52,  65,  60,  54,  58,  50,  35],
+    },
+  };
+
+  // ── Private helpers ──────────────────────────────────────────────────────
+
+  /**
+   * _buildAuthHeader — constructs Basic Auth header for SN REST API.
+   * Only used when MOCK_MODE=false.
+   * @returns {string} Base64-encoded "username:password"
+   */
+  function _buildAuthHeader() {
+    return 'Basic ' + btoa(`${SN_CONFIG.username}:${SN_CONFIG.password}`);
+  }
+
+  /**
+   * _fetchTable — fetches a ServiceNow table via the REST Table API.
+   * Handles PDI hibernation timeout gracefully (retries up to 2x with 5s delay).
+   *
+   * @param {string} table     - SN table name (e.g. 'incident', 'change_request')
+   * @param {string} query     - sysparm_query encoded query string
+   * @param {string} fields    - sysparm_fields comma-separated list
+   * @param {number} limit     - sysparm_limit (defaults to 50)
+   * @returns {Promise<Array>} - Array of record objects from result[]
+   */
+  async function _fetchTable(table, query, fields, limit = 50) {
+    const url = new URL(`${SN_CONFIG.instanceUrl}/api/now/table/${table}`);
+    url.searchParams.set('sysparm_query',           query);
+    url.searchParams.set('sysparm_fields',          fields);
+    url.searchParams.set('sysparm_limit',           String(limit));
+    url.searchParams.set('sysparm_display_value',   'false');
+    url.searchParams.set('sysparm_exclude_ref_link','true');
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        'Authorization': _buildAuthHeader(),
+        'Accept':        'application/json',
+        'Content-Type':  'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`SN API ${response.status}: ${response.statusText} — table: ${table}`);
+    }
+
+    const json = await response.json();
+    return json.result || [];
+  }
+
+  // ── Public API ───────────────────────────────────────────────────────────
+  return {
+
+    /**
+     * DataLayer.init()
+     * Called once on DOMContentLoaded. Loads mock or live data into _data.
+     * Triggers DashboardEngine.renderAll() when data is ready.
+     */
+    async init() {
+      if (MOCK_MODE) {
+        _data = MOCK;
+        _lastFetch = new Date();
+        console.info('[DataLayer] MOCK_MODE=true — using mock ServiceNow data');
+      } else {
+        await this.refresh();
+      }
+    },
+
+    /**
+     * DataLayer.refresh()
+     * Fetches fresh data from all four SN tables.
+     * Falls back to mock data if the PDI is unreachable (hibernating).
+     */
+    async refresh() {
+      document.getElementById('last-updated').textContent = 'Fetching…';
+
+      if (MOCK_MODE) {
+        _data = MOCK;
+        _lastFetch = new Date();
+        DashboardEngine.renderAll(_data);
+        document.getElementById('last-updated').textContent = 'Mock data · ' + _lastFetch.toLocaleTimeString('en-AU');
+        return;
+      }
+
+      try {
+        const [incidents, changes, problems, articles] = await Promise.all([
+          _fetchTable('incident',       'active=true^ORDERBYpriority', 'number,priority,short_description,assigned_to,opened_at,sla_due,state'),
+          _fetchTable('change_request', 'sys_created_on>=javascript:gs.beginningOfLast30Days()', 'number,type,risk,close_code,short_description,sys_created_on'),
+          _fetchTable('problem',        'state!=107',                  'number,short_description,state,cause_notes,priority'),
+          _fetchTable('kb_knowledge',   'workflow_state=published',    'number,short_description,view_count,useful_count,kb_category', 100),
+        ]);
+
+        _data = { incidents, changes, problems, kb_articles: articles, mttr_trend: MOCK.mttr_trend };
+        _lastFetch = new Date();
+        DashboardEngine.renderAll(_data);
+        document.getElementById('last-updated').textContent = 'Live · ' + _lastFetch.toLocaleTimeString('en-AU');
+        console.info(`[DataLayer] Live data: ${incidents.length} incidents, ${changes.length} changes, ${problems.length} problems, ${articles.length} KB articles`);
+
+      } catch (err) {
+        console.warn('[DataLayer] Live fetch failed — falling back to mock data. Error:', err.message);
+        _data = MOCK;
+        DashboardEngine.renderAll(_data);
+        document.getElementById('last-updated').textContent = 'Fallback mock · ' + new Date().toLocaleTimeString('en-AU');
+      }
+    },
+
+    /** Returns the raw cached snapshot. Used by AIEngine.analyze(). */
+    getSnapshot() { return _data; },
+
+    /**
+     * DataLayer.getKPIs()
+     * Computes the six global KPI card values from the current snapshot.
+     * @returns {Object} KPI values object
+     */
+    getKPIs() {
+      if (!_data) return {};
+      const d = _data;
+
+      // SLA compliance: incidents with mttr ≤ threshold / total
+      const slaPass = d.incidents.filter(i => {
+        if (!i.mttr_hours) return true; // Still open — not yet a breach
+        const t = SN_CONFIG.slaThresholds;
+        const map = { '1': t.p1_hours, '2': t.p2_hours, '3': t.p3_hours, '4': t.p4_hours };
+        return i.mttr_hours <= (map[i.priority] || 72);
+      });
+      const slaCompliance = Math.round((slaPass.length / d.incidents.length) * 100);
+
+      // Average MTTR across resolved incidents
+      const resolved = d.incidents.filter(i => i.mttr_hours);
+      const avgMTTR = resolved.length
+        ? (resolved.reduce((a, b) => a + b.mttr_hours, 0) / resolved.length).toFixed(1)
+        : 'N/A';
+
+      // Change success rate
+      const successChanges = d.changes.filter(c => c.close_code === 'successful');
+      const changeSuccessRate = Math.round((successChanges.length / d.changes.length) * 100);
+
+      // KB deflection rate
+      const totalViews  = d.kb_articles.reduce((a, b) => a + b.view_count, 0);
+      const totalUseful = d.kb_articles.reduce((a, b) => a + b.useful_count, 0);
+      const kbDeflection = Math.round((totalUseful / totalViews) * 100);
+
+      return {
+        activeIncidents:  d.incidents.length,
+        slaCompliance,
+        avgMTTR,
+        changeSuccessRate,
+        openProblems:     d.problems.length,
+        kbDeflection,
+      };
+    },
+  };
+})();
+
+
+/*
+  ============================================================
+  MODULE 3: CHART MANAGER
+  ─────────────────────────────────────────────────────────────
+  Wraps Chart.js lifecycle. Stores all Chart instances by ID
+  and destroys them before re-creating to prevent the
+  "canvas context already in use" browser error.
+
+  Usage:
+    ChartManager.create('myCanvas', { type: 'bar', ... });
+    ChartManager.destroy('myCanvas');   // call before re-render
+    ChartManager.destroyAll();          // clean up on page unload
+  ============================================================
+*/
+const ChartManager = (() => {
+  const _instances = {};  // { canvasId: Chart instance }
+
+  return {
+    /**
+     * ChartManager.create(id, config)
+     * Destroys any existing chart on this canvas ID, then creates a new one.
+     * @param {string} id      - canvas element ID
+     * @param {Object} config  - Chart.js configuration object
+     * @returns {Chart}        - the new Chart instance
+     */
+    create(id, config) {
+      if (_instances[id]) {
+        _instances[id].destroy();
+        delete _instances[id];
+      }
+      const canvas = document.getElementById(id);
+      if (!canvas) {
+        console.warn(`[ChartManager] Canvas #${id} not found`);
+        return null;
+      }
+      const chart = new Chart(canvas, config);
+      _instances[id] = chart;
+      return chart;
+    },
+
+    destroy(id) {
+      if (_instances[id]) { _instances[id].destroy(); delete _instances[id]; }
+    },
+
+    destroyAll() {
+      Object.keys(_instances).forEach(id => this.destroy(id));
+    },
+  };
+})();
+
+
+/*
+  ============================================================
+  MODULE 4: AI ENGINE
+  ─────────────────────────────────────────────────────────────
+  Calls the Anthropic API (via backend proxy) to generate an
+  AI Root Cause Analysis summary from current ITSM metrics.
+
+  Flow:
+  1. Reads current KPIs + snapshot from DataLayer.
+  2. Builds a structured prompt with metric context.
+  3. POSTs to AI_CONFIG.proxyEndpoint (your Express proxy server).
+  4. The proxy adds the x-api-key header and forwards to:
+       https://api.anthropic.com/v1/messages
+  5. Streams the response text into the #ai-output div.
+  6. Falls back to FALLBACK_ANALYSIS if proxy unreachable.
+
+  Companion proxy (server/proxy.js):
+    const express = require('express');
+    const app = express();
+    app.use(express.json());
+    app.use(require('cors')());
+    app.post('/api/analyze', async (req, res) => {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(req.body),
+      });
+      res.json(await r.json());
+    });
+    app.listen(3001);
+  ============================================================
+*/
+const AIEngine = (() => {
+
+  /** Pre-computed fallback when proxy is unavailable or useRealAPI=false */
+  const FALLBACK_ANALYSIS = `ITSM Root Cause Analysis — Pre-computed (Fallback Mode)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/engineering:incident-response
+  P1 average MTTR (3.2–4.8h) is tracking near the 4-hour SLA boundary. Two P1 incidents
+  share the same root: DB connection pool exhaustion under peak load (PRB0000412). P2 MTTR
+  is within SLA but the IntegrationHub Slack spoke failure (INC0010025) recurs — linked to
+  PRB0000409, which is in Known Error state. Recommend escalating PRB0000409 fix to next
+  sprint.
+
+/engineering:code-review
+  Change success rate is 80%. Two rollbacks (CHG0001181, CHG0001175) occurred on High-risk
+  Normal changes. Root pattern: deploy-time validation gaps. Pre-deploy smoke tests and
+  canary deployment on AU-PROD environment would reduce rollback frequency.
+
+/engineering:documentation
+  KB deflection rate is 70% overall. Three articles flagged as low-utility (< 40% at > 500
+  views): VPN troubleshooting, email delivery guide, and password reset. These drive repeat
+  incidents. Recommend content refresh and search-index rebuild (see PRB0000405).
+
+/engineering:architecture & debug
+  6 open problem records. PRB0000412 (DB pool) is highest-risk with 7 linked incidents.
+  PRB0000409 (Slack spoke) has 6 linked incidents and is in Known Error — a vendor fix is
+  available in IntegrationHub Slack spoke v3.0.2. Deploy immediately.
+
+Recommended priority actions:
+  1. Patch Slack spoke to v3.0.2 — closes PRB0000409 (6 incidents).
+  2. Increase DB connection pool limit — closes PRB0000412 (7 incidents).
+  3. Rebuild Service Portal search index — closes PRB0000405.
+  4. Enforce pre-deploy smoke tests for High-risk Normal changes.`;
+
+  return {
+
+    /**
+     * AIEngine.analyze()
+     * Generates root cause analysis by calling the Claude API.
+     * Falls back to FALLBACK_ANALYSIS if API is unavailable.
+     *
+     * Prompt structure:
+     *   - System: You are a ServiceNow ITSM analyst...
+     *   - User:   Current ITSM metrics as JSON + analysis request
+     */
+    async analyze() {
+      const outputEl  = document.getElementById('ai-output');
+      const loadingEl = document.getElementById('ai-loading');
+
+      outputEl.textContent  = '';
+      loadingEl.classList.add('visible');
+
+      // Short-circuit to fallback if real API is disabled
+      if (!AI_CONFIG.useRealAPI) {
+        await new Promise(r => setTimeout(r, 800)); // simulate latency
+        loadingEl.classList.remove('visible');
+        outputEl.textContent = FALLBACK_ANALYSIS;
+        return;
+      }
+
+      // Build metric summary for the prompt
+      const snap = DataLayer.getSnapshot();
+      const kpis = DataLayer.getKPIs();
+      const metricContext = JSON.stringify({
+        activeIncidents:  kpis.activeIncidents,
+        slaCompliance:    kpis.slaCompliance + '%',
+        avgMTTR:          kpis.avgMTTR + 'h',
+        changeSuccessRate: kpis.changeSuccessRate + '%',
+        openProblems:     kpis.openProblems,
+        kbDeflection:     kpis.kbDeflection + '%',
+        highRiskIncidents: snap.incidents.filter(i => i.priority === '1' || i.priority === '2').length,
+        recentRollbacks:   snap.changes.filter(c => c.close_code && c.close_code.includes('rollback')).length,
+        lowUtilityArticles: snap.kb_articles.filter(a => a.view_count > 500 && (a.useful_count / a.view_count) < 0.4).length,
+      }, null, 2);
+
+      // Anthropic API request body
+      const requestBody = {
+        model:      AI_CONFIG.model,
+        max_tokens: AI_CONFIG.maxTokens,
+        system: `You are a senior ServiceNow ITSM analyst for LTIMindtree's AU region.
+Analyse the provided ITSM metrics and generate a concise root cause analysis across four
+engineering workflows: incident-response, code-review, documentation, and architecture/debug.
+Be specific about problem numbers, patterns, and actionable recommendations.
+Format with clear section headers matching /engineering:* route names. Keep to ~300 words.`,
+        messages: [
+          {
+            role:    'user',
+            content: `Current ITSM metrics snapshot from ServiceNow PDI (AU region):\n\n${metricContext}\n\nGenerate a root cause analysis and top recommended actions.`,
+          },
+        ],
+      };
+
+      try {
+        // POST to the backend proxy (server/proxy.js) which adds the API key
+        const response = await fetch(AI_CONFIG.proxyEndpoint, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Proxy returned ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        // Extract text from the Anthropic response (content array)
+        // data.content = [{ type: 'text', text: '...' }, ...]
+        const text = (data.content || [])
+          .filter(block => block.type === 'text')
+          .map(block => block.text)
+          .join('\n');
+
+        loadingEl.classList.remove('visible');
+        outputEl.textContent = text || 'No analysis returned.';
+
+      } catch (err) {
+        console.warn('[AIEngine] Proxy unreachable — using fallback analysis. Error:', err.message);
+        loadingEl.classList.remove('visible');
+        outputEl.textContent = FALLBACK_ANALYSIS + '\n\n[Note: Live AI unavailable — proxy not running. Start with: node server/proxy.js]';
+      }
+    },
+  };
+})();
+
+
+/*
+  ============================================================
+  MODULE 5: DASHBOARD ENGINE
+  ─────────────────────────────────────────────────────────────
+  Orchestrates all rendering. Called by DataLayer after a
+  successful data fetch. Each render*() method is isolated
+  so individual panels can be refreshed independently.
+  ============================================================
+*/
+const DashboardEngine = (() => {
+
+  // ── Helper utilities ─────────────────────────────────────────────────────
+
+  /** Maps SN priority number to display label */
+  const PRIORITY_LABEL = { '1':'P1 Critical', '2':'P2 High', '3':'P3 Moderate', '4':'P4 Low' };
+
+  /** Maps SN incident state number to display label */
+  const STATE_LABEL = { '1':'New', '2':'In Progress', '3':'On Hold', '6':'Resolved', '7':'Closed', '8':'Cancelled' };
+
+  /** Maps SN problem state to label */
+  const PROB_STATE_LABEL = { '101':'Open', '102':'Root Cause Analysis', '103':'Fix in Progress', '104':'Known Error', '107':'Closed' };
+
+  /** Returns a breach-risk badge class based on priority and MTTR */
+  function _breachRisk(incident) {
+    if (incident.state === '6' || incident.state === '7') return { label:'Resolved', cls:'badge-green' };
+    const t = SN_CONFIG.slaThresholds;
+    const map = { '1': t.p1_hours, '2': t.p2_hours, '3': t.p3_hours, '4': t.p4_hours };
+    const sla = map[incident.priority] || 72;
+    if (!incident.mttr_hours) {
+      // Still open — check time since opened_at
+      const elapsed = (Date.now() - new Date(incident.opened_at)) / 3600000;
+      if (elapsed > sla)         return { label:'Breached', cls:'badge-red' };
+      if (elapsed > sla * 0.8)   return { label:'At Risk',  cls:'badge-amber' };
+      return { label:'On Track', cls:'badge-green' };
+    }
+    if (incident.mttr_hours > sla)       return { label:'Breached', cls:'badge-red' };
+    if (incident.mttr_hours > sla * 0.9) return { label:'Near SLA', cls:'badge-amber' };
+    return { label:'Met SLA', cls:'badge-green' };
+  }
+
+  /** SLA bar fill color */
+  function _slaColor(pct, target) {
+    if (pct >= target)       return '#16A34A';
+    if (pct >= target - 10)  return '#D97706';
+    return '#DC2626';
+  }
+
+  /** Formats an ISO date string for display */
+  function _fmtDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('en-AU', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+  }
+
+  // ── KPI Card renderer ─────────────────────────────────────────────────────
+  function _renderKPICards(containerId, cards) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = cards.map(c => `
+      <div class="kpi-card">
+        <div class="kpi-label">${c.label}</div>
+        <div class="kpi-value" style="color:${c.color || 'var(--c-text-1)'}">${c.value}</div>
+        <div class="kpi-delta ${c.deltaClass || 'delta-neutral'}">${c.delta || ''}</div>
+      </div>`).join('');
+  }
+
+  // ── Public render methods ─────────────────────────────────────────────────
+  return {
+
+    /**
+     * DashboardEngine.renderAll(data)
+     * Called by DataLayer after every successful fetch.
+     * Drives all four engineering workflow panels.
+     */
+    renderAll(data) {
+      this.renderOverview(data);
+      this.renderIncidentResponse(data);
+      this.renderCodeReview(data);
+      this.renderDocumentation(data);
+      this.renderArchitecture(data);
+      this.renderIntegrations(data);
+      document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU');
+    },
+
+    /* ── /dashboard:overview ────────────────────────────────────────────── */
+    renderOverview(data) {
+      const kpis = DataLayer.getKPIs();
+
+      // Global KPI cards
+      _renderKPICards('kpi-grid', [
+        { label:'Active Incidents',    value: kpis.activeIncidents,      color:'var(--c-red)',    delta:'↑ 2 since yesterday', deltaClass:'delta-down' },
+        { label:'SLA Compliance',      value: kpis.slaCompliance + '%',  color: kpis.slaCompliance >= 90 ? 'var(--c-green)' : 'var(--c-amber)', delta:'Target: 90%' },
+        { label:'Avg MTTR',            value: kpis.avgMTTR + 'h',        color:'var(--c-blue)',   delta:'P1 target: 4h' },
+        { label:'Change Success Rate', value: kpis.changeSuccessRate + '%', color: kpis.changeSuccessRate >= 85 ? 'var(--c-green)' : 'var(--c-amber)', delta:'Last 30 days' },
+        { label:'Open Problems',       value: kpis.openProblems,         color:'var(--c-purple)', delta:'2 in RCA phase' },
+        { label:'KB Deflection',       value: kpis.kbDeflection + '%',   color:'var(--c-teal)',   delta:'3 articles low-utility', deltaClass: kpis.kbDeflection >= 70 ? 'delta-up' : 'delta-down' },
+      ]);
+
+      // MTTR Trend Line Chart (12-week rolling)
+      const trend = data.mttr_trend;
+      ChartManager.create('chart-mttr', {
+        type: 'line',
+        data: {
+          labels: trend.weeks,
+          datasets: [
+            { label:'P1 Critical', data: trend.p1_hours, borderColor:'#DC2626', backgroundColor:'rgba(220,38,38,.1)', borderWidth:2, pointRadius:3, tension:.3,
+              borderDash: [],      pointStyle:'circle' },
+            { label:'P2 High',     data: trend.p2_hours, borderColor:'#D97706', backgroundColor:'rgba(217,119,6,.08)', borderWidth:2, pointRadius:3, tension:.3,
+              borderDash: [4,3],   pointStyle:'triangle' },
+            { label:'P3 Moderate', data: trend.p3_hours, borderColor:'#1A6FE8', backgroundColor:'rgba(26,111,232,.07)', borderWidth:2, pointRadius:3, tension:.3,
+              borderDash: [2,2],   pointStyle:'rect' },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { title: { display: true, text:'Hours', font:{ size:11 } },
+                 grid:{ color:'rgba(0,0,0,.05)' } },
+            x: { grid:{ display: false } },
+          },
+        },
+      });
+
+      // Custom legend
+      document.getElementById('mttr-legend').innerHTML = [
+        ['#DC2626','P1 Critical'],['#D97706','P2 High'],['#1A6FE8','P3 Moderate'],
+      ].map(([c,l]) => `<span class="legend-item"><span class="legend-dot" style="background:${c}"></span>${l}</span>`).join('');
+
+      // Change Outcomes Donut
+      const outcomes = {
+        success:  data.changes.filter(c => c.close_code === 'successful').length,
+        rollback: data.changes.filter(c => c.close_code && c.close_code.includes('rollback')).length,
+        failure:  data.changes.filter(c => c.close_code && !c.close_code.includes('successful') && !c.close_code.includes('rollback')).length,
+      };
+      ChartManager.create('chart-change', {
+        type: 'doughnut',
+        data: {
+          labels:   ['Successful','Rollback','Unsuccessful'],
+          datasets: [{ data: [outcomes.success, outcomes.rollback, outcomes.failure],
+                       backgroundColor: ['#16A34A','#D97706','#DC2626'],
+                       borderWidth: 2, borderColor:'#FFFFFF',
+                       hoverOffset: 6 }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, cutout:'65%',
+          plugins: { legend:{ display:false } },
+        },
+      });
+      document.getElementById('change-legend').innerHTML = [
+        ['#16A34A','Successful','badge-green'],['#D97706','Rollback','badge-amber'],['#DC2626','Unsuccessful','badge-red'],
+      ].map(([c,l]) => `<span class="legend-item"><span class="legend-dot" style="background:${c}"></span>${l}</span>`).join('');
+
+      // SLA Compliance Bars
+      const slaData = [
+        { label:'P1 Critical', target:90, pct: 75 },
+        { label:'P2 High',     target:95, pct: 88 },
+        { label:'P3 Moderate', target:98, pct: 92 },
+        { label:'P4 Low',      target:99, pct: 97 },
+      ];
+      document.getElementById('sla-list').innerHTML = slaData.map(s => {
+        const color = _slaColor(s.pct, s.target);
+        return `<div class="sla-row">
+          <div class="sla-row-header">
+            <span class="sla-row-label">${s.label}</span>
+            <span class="sla-row-pct" style="color:${color}">${s.pct}% <span style="color:var(--c-text-3);font-weight:400">/ ${s.target}% target</span></span>
+          </div>
+          <div class="sla-bar-bg">
+            <div class="sla-bar-fill" style="width:${s.pct}%;background:${color}"></div>
+          </div>
+        </div>`;
+      }).join('');
+
+      // KB Deflection Bar Chart
+      const kbCats = [...new Set(data.kb_articles.map(a => a.kb_category))];
+      const kbByCategory = kbCats.map(cat => {
+        const arts = data.kb_articles.filter(a => a.kb_category === cat);
+        const tv = arts.reduce((a,b) => a + b.view_count, 0);
+        const tu = arts.reduce((a,b) => a + b.useful_count, 0);
+        return Math.round((tu / tv) * 100);
+      });
+      ChartManager.create('chart-kb', {
+        type: 'bar',
+        data: {
+          labels: kbCats,
+          datasets: [{
+            label:'Deflection %',
+            data: kbByCategory,
+            backgroundColor: kbByCategory.map(v => v >= 60 ? '#16A34A' : v >= 40 ? '#D97706' : '#DC2626'),
+            borderRadius: 4,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend:{ display:false } },
+          scales: {
+            y: { max:100, title:{ display:true, text:'Deflection %', font:{size:11} }, ticks:{ callback: v => v+'%' } },
+            x: { ticks:{ font:{size:10}, maxRotation:30 }, grid:{ display:false } },
+          },
+        },
+      });
+    },
+
+    /* ── /engineering:incident-response ────────────────────────────────── */
+    renderIncidentResponse(data) {
+      const p1 = data.incidents.filter(i => i.priority === '1');
+      const p2 = data.incidents.filter(i => i.priority === '2');
+      const resolved = data.incidents.filter(i => i.mttr_hours);
+      const avgMTTR = resolved.length ? (resolved.reduce((a,b) => a + b.mttr_hours, 0) / resolved.length).toFixed(1) : 'N/A';
+
+      _renderKPICards('inc-kpi-grid', [
+        { label:'P1 Open',         value: p1.length,                 color:'var(--c-red)',   delta:'SLA: 4h' },
+        { label:'P2 Open',         value: p2.length,                 color:'var(--c-amber)', delta:'SLA: 8h' },
+        { label:'Avg MTTR (all)',   value: avgMTTR + 'h',             color:'var(--c-blue)',  delta:'Across resolved' },
+        { label:'P1 Avg MTTR',      value: (p1.filter(i=>i.mttr_hours).reduce((a,b)=>a+b.mttr_hours,0)/Math.max(1,p1.filter(i=>i.mttr_hours).length)).toFixed(1)+'h',
+                                                                      color:'var(--c-red)',   delta:'Target: 4h' },
+      ]);
+
+      // Weekly MTTR grouped bar
+      const weeks = data.mttr_trend.weeks.slice(-6);
+      ChartManager.create('chart-inc-mttr', {
+        type: 'bar',
+        data: {
+          labels: weeks,
+          datasets: [
+            { label:'P1 MTTR',     data: data.mttr_trend.p1_hours.slice(-6), backgroundColor:'#DC2626', borderRadius:3 },
+            { label:'P2 MTTR',     data: data.mttr_trend.p2_hours.slice(-6), backgroundColor:'#D97706', borderRadius:3 },
+            { label:'P3 MTTR',     data: data.mttr_trend.p3_hours.slice(-6), backgroundColor:'#1A6FE8', borderRadius:3 },
+            { label:'SLA P1 (4h)', data: Array(6).fill(SN_CONFIG.slaThresholds.p1_hours),
+              type:'line', borderColor:'#991B1B', borderDash:[4,3], borderWidth:1.5, pointRadius:0, fill:false },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend:{ display:false } },
+          scales: {
+            y:{ title:{display:true, text:'Hours', font:{size:11}}, grid:{ color:'rgba(0,0,0,.05)' } },
+            x:{ grid:{ display:false } },
+          },
+        },
+      });
+
+      document.getElementById('inc-mttr-legend').innerHTML = [
+        ['#DC2626','P1 Critical'],['#D97706','P2 High'],['#1A6FE8','P3 Moderate'],['#991B1B','P1 SLA (4h) — dashed'],
+      ].map(([c,l]) => `<span class="legend-item"><span class="legend-dot" style="background:${c}"></span>${l}</span>`).join('');
+
+      // Active incident table
+      const sorted = [...data.incidents].sort((a, b) => (parseInt(a.priority) || 9) - (parseInt(b.priority) || 9));
+      const atRisk = sorted.filter(i => {
+        const r = _breachRisk(i);
+        return r.label === 'Breached' || r.label === 'At Risk';
+      });
+      document.getElementById('breach-count-badge').textContent = `${atRisk.length} at risk`;
+
+      document.getElementById('incident-tbody').innerHTML = sorted.map(i => {
+        const risk = _breachRisk(i);
+        return `<tr>
+          <td style="font-family:var(--font-mono);font-size:11px">${i.number}</td>
+          <td><span class="p-dot p${i.priority}">${PRIORITY_LABEL[i.priority] || i.priority}</span></td>
+          <td>${i.short_description}</td>
+          <td>${i.assigned_to}</td>
+          <td style="font-size:11px;white-space:nowrap">${_fmtDate(i.opened_at)}</td>
+          <td style="font-size:11px;white-space:nowrap">${_fmtDate(i.sla_due)}</td>
+          <td><span class="badge badge-blue">${STATE_LABEL[i.state] || i.state}</span></td>
+          <td><span class="badge ${risk.cls}">${risk.label}</span></td>
+        </tr>`;
+      }).join('');
+    },
+
+    /* ── /engineering:code-review ───────────────────────────────────────── */
+    renderCodeReview(data) {
+      const success  = data.changes.filter(c => c.close_code === 'successful').length;
+      const rollback = data.changes.filter(c => c.close_code && c.close_code.includes('rollback')).length;
+      const fail     = data.changes.length - success - rollback;
+      const rate     = Math.round((success / data.changes.length) * 100);
+
+      _renderKPICards('cr-kpi-grid', [
+        { label:'Total Changes (30d)',  value: data.changes.length, color:'var(--c-blue)',   delta:'Rolling 30 days' },
+        { label:'Success Rate',         value: rate + '%',           color: rate >= 85 ? 'var(--c-green)' : 'var(--c-amber)', delta:'Target: 85%' },
+        { label:'Rollbacks',            value: rollback,             color:'var(--c-amber)', delta:'High-risk changes' },
+        { label:'Failures',             value: fail,                 color:'var(--c-red)',   delta:'Require RCA' },
+      ]);
+
+      // Outcomes donut
+      ChartManager.create('chart-cr-donut', {
+        type: 'doughnut',
+        data: {
+          labels:   ['Successful','Rollback','Failed'],
+          datasets: [{ data:[success, rollback, fail], backgroundColor:['#16A34A','#D97706','#DC2626'], borderWidth:2, borderColor:'#fff', hoverOffset:6 }],
+        },
+        options: { responsive:true, maintainAspectRatio:false, cutout:'65%', plugins:{legend:{display:false}} },
+      });
+      document.getElementById('cr-donut-legend').innerHTML = [
+        ['#16A34A','Successful ('+success+')'],['#D97706','Rollback ('+rollback+')'],['#DC2626','Failed ('+fail+')'],
+      ].map(([c,l]) => `<span class="legend-item"><span class="legend-dot" style="background:${c}"></span>${l}</span>`).join('');
+
+      // Risk bar chart
+      const risks = ['Low','Medium','High'];
+      const riskCounts = risks.map(r => data.changes.filter(c => c.risk === r).length);
+      ChartManager.create('chart-cr-risk', {
+        type: 'bar',
+        data: {
+          labels: risks,
+          datasets:[{ label:'Changes', data:riskCounts, backgroundColor:['#16A34A','#D97706','#DC2626'], borderRadius:4 }],
+        },
+        options: {
+          responsive:true, maintainAspectRatio:false, indexAxis:'y',
+          plugins:{ legend:{display:false} },
+          scales:{ x:{grid:{color:'rgba(0,0,0,.05)'}}, y:{grid:{display:false}} },
+        },
+      });
+
+      // Change table
+      document.getElementById('change-tbody').innerHTML = data.changes.map(c => {
+        const outcomeMap = {
+          'successful':           ['Met SLA','badge-green'],
+          'unsuccessful_rollback':['Rolled Back','badge-amber'],
+          'unsuccessful':         ['Failed','badge-red'],
+        };
+        const [label, cls] = outcomeMap[c.close_code] || [c.close_code,'badge-blue'];
+        const riskCls = {'Low':'badge-green','Medium':'badge-amber','High':'badge-red'}[c.risk] || 'badge-blue';
+        return `<tr>
+          <td style="font-family:var(--font-mono);font-size:11px">${c.number}</td>
+          <td><span class="badge badge-blue">${c.type}</span></td>
+          <td><span class="badge ${riskCls}">${c.risk}</span></td>
+          <td>${c.short_description}</td>
+          <td><span class="badge ${cls}">${label}</span></td>
+          <td style="font-size:11px">${c.sys_created_on}</td>
+        </tr>`;
+      }).join('');
+    },
+
+    /* ── /engineering:documentation ─────────────────────────────────────── */
+    renderDocumentation(data) {
+      const totalViews  = data.kb_articles.reduce((a,b) => a + b.view_count, 0);
+      const totalUseful = data.kb_articles.reduce((a,b) => a + b.useful_count, 0);
+      const deflection  = Math.round((totalUseful / totalViews) * 100);
+      const lowUtil     = data.kb_articles.filter(a => a.view_count > 500 && (a.useful_count / a.view_count) < 0.4);
+
+      _renderKPICards('kb-kpi-grid', [
+        { label:'Published Articles', value: data.kb_articles.length, color:'var(--c-blue)',   delta:'workflow_state=published' },
+        { label:'Total Views',        value: totalViews.toLocaleString(), color:'var(--c-text-1)', delta:'This month' },
+        { label:'Overall Deflection', value: deflection + '%',          color: deflection >= 70 ? 'var(--c-green)' : 'var(--c-amber)', delta:'Target: 70%' },
+        { label:'Low Utility Alerts', value: lowUtil.length,            color:'var(--c-red)',   delta:'>500 views & <40% deflection' },
+      ]);
+
+      // Scatter: view_count vs deflection rate
+      const scatterData = data.kb_articles.map(a => ({
+        x: a.view_count,
+        y: Math.round((a.useful_count / a.view_count) * 100),
+        label: a.number,
+      }));
+      ChartManager.create('chart-kb-utility', {
+        type: 'scatter',
+        data: {
+          datasets: [{
+            label: 'KB Articles',
+            data: scatterData,
+            backgroundColor: scatterData.map(d => d.y >= 40 ? 'rgba(26,111,232,.7)' : 'rgba(220,38,38,.7)'),
+            pointRadius: 7, pointHoverRadius: 9,
+            pointStyle: 'circle',
+          },
+          // Alert threshold reference line at 40%
+          {
+            label: '40% Alert Threshold',
+            data: [{ x:0, y:40 },{ x:1500, y:40 }],
+            type: 'line',
+            borderColor: '#DC2626', borderDash:[6,4], borderWidth:1.5,
+            pointRadius: 0, fill:false,
+          }],
+        },
+        options: {
+          responsive:true, maintainAspectRatio:false,
+          plugins:{ legend:{display:false}, tooltip:{ callbacks:{
+            label: ctx => ctx.dataset.type === 'line' ? '40% alert threshold'
+                       : `${ctx.raw.label}: ${ctx.raw.x} views · ${ctx.raw.y}% deflection`,
+          }}},
+          scales:{
+            x:{ title:{display:true, text:'View Count', font:{size:11}}, grid:{color:'rgba(0,0,0,.04)'} },
+            y:{ title:{display:true, text:'Deflection %', font:{size:11}}, max:110, ticks:{ callback: v => v+'%' } },
+          },
+        },
+      });
+
+      // KB article table sorted by deflection asc (worst first)
+      const sorted = [...data.kb_articles].sort((a,b) => {
+        const ra = a.useful_count / a.view_count;
+        const rb = b.useful_count / b.view_count;
+        return ra - rb;
+      });
+      document.getElementById('kb-tbody').innerHTML = sorted.map(a => {
+        const pct = Math.round((a.useful_count / a.view_count) * 100);
+        const isLow = a.view_count > 500 && pct < 40;
+        const statusCls = isLow ? 'badge-red' : pct >= 70 ? 'badge-green' : 'badge-amber';
+        const statusLabel = isLow ? 'Low Utility' : pct >= 70 ? 'Healthy' : 'Monitor';
+        return `<tr>
+          <td style="font-family:var(--font-mono);font-size:11px">${a.number}</td>
+          <td><span class="badge badge-blue">${a.kb_category}</span></td>
+          <td>${a.short_description}</td>
+          <td style="font-family:var(--font-mono);font-size:12px">${a.view_count.toLocaleString()}</td>
+          <td style="font-family:var(--font-mono);font-size:12px">${a.useful_count.toLocaleString()}</td>
+          <td style="font-family:var(--font-mono);font-size:12px;color:${pct < 40 ? 'var(--c-red)' : 'var(--c-green)'}">${pct}%</td>
+          <td><span class="badge ${statusCls}">${statusLabel}</span></td>
+        </tr>`;
+      }).join('');
+    },
+
+    /* ── /engineering:architecture & debug ──────────────────────────────── */
+    renderArchitecture(data) {
+      const stateGroups = {};
+      data.problems.forEach(p => {
+        const lbl = PROB_STATE_LABEL[p.state] || p.state;
+        stateGroups[lbl] = (stateGroups[lbl] || 0) + 1;
+      });
+
+      _renderKPICards('arch-kpi-grid', [
+        { label:'Open Problems',       value: data.problems.length,                                                           color:'var(--c-purple)', delta:'state != 107 (Closed)' },
+        { label:'In RCA',              value: data.problems.filter(p => p.state === '102').length,                            color:'var(--c-amber)',  delta:'State 102' },
+        { label:'Known Errors',        value: data.problems.filter(p => p.state === '104').length,                            color:'var(--c-red)',    delta:'State 104 — fix available' },
+        { label:'Linked Incidents',    value: data.problems.reduce((a,b) => a + (b.linked_incidents || 0), 0),                color:'var(--c-blue)',   delta:'Cross-problem total' },
+      ]);
+
+      // Problem state donut
+      const stateColors = { 'Open':'#1A6FE8', 'Root Cause Analysis':'#D97706', 'Fix in Progress':'#7C3AED', 'Known Error':'#DC2626' };
+      ChartManager.create('chart-prob-state', {
+        type: 'doughnut',
+        data: {
+          labels: Object.keys(stateGroups),
+          datasets:[{ data: Object.values(stateGroups),
+            backgroundColor: Object.keys(stateGroups).map(k => stateColors[k] || '#94A3B8'),
+            borderWidth:2, borderColor:'#fff', hoverOffset:6 }],
+        },
+        options:{ responsive:true, maintainAspectRatio:false, cutout:'60%', plugins:{legend:{display:false}} },
+      });
+      document.getElementById('prob-state-legend').innerHTML = Object.entries(stateGroups).map(([k,v]) =>
+        `<span class="legend-item"><span class="legend-dot" style="background:${stateColors[k]||'#94A3B8'}"></span>${k} (${v})</span>`
+      ).join('');
+
+      // Linked incidents horizontal bar
+      const sortedProbs = [...data.problems].sort((a,b) => (b.linked_incidents||0)-(a.linked_incidents||0)).slice(0,8);
+      ChartManager.create('chart-prob-incidents', {
+        type: 'bar',
+        data: {
+          labels: sortedProbs.map(p => p.number),
+          datasets:[{ label:'Linked Incidents', data: sortedProbs.map(p => p.linked_incidents||0),
+            backgroundColor:'#7C3AED', borderRadius:3 }],
+        },
+        options:{
+          responsive:true, maintainAspectRatio:false, indexAxis:'y',
+          plugins:{legend:{display:false}},
+          scales:{ x:{ ticks:{precision:0}, grid:{color:'rgba(0,0,0,.04)'} }, y:{ grid:{display:false}, ticks:{font:{size:11}} } },
+        },
+      });
+
+      // Problem table
+      document.getElementById('prob-tbody').innerHTML = data.problems.map(p => {
+        const stateCls = { '101':'badge-blue','102':'badge-amber','103':'badge-purple','104':'badge-red' };
+        const priCls   = { '1':'badge-red','2':'badge-amber','3':'badge-blue','4':'badge-teal' };
+        return `<tr>
+          <td style="font-family:var(--font-mono);font-size:11px">${p.number}</td>
+          <td><span class="badge ${priCls[p.priority]||'badge-blue'}">${PRIORITY_LABEL[p.priority]||p.priority}</span></td>
+          <td><span class="badge ${stateCls[p.state]||'badge-blue'}">${PROB_STATE_LABEL[p.state]||p.state}</span></td>
+          <td>${p.short_description}</td>
+          <td style="font-family:var(--font-mono);text-align:center">${p.linked_incidents||0}</td>
+          <td style="color:var(--c-text-2);font-size:12px">${p.cause_notes||'—'}</td>
+        </tr>`;
+      }).join('');
+    },
+
+    /* ── /engineering:integrations ──────────────────────────────────────── */
+    renderIntegrations(data) {
+      // Active Flow Designer workflows (mock — in production read from sys_hub_flow table)
+      const flows = [
+        { name:'Incident Auto-Assignment — Priority Router',  type:'Trigger: Record Created',      status:'Active', runs:'847 / day' },
+        { name:'Change CAB Approval Workflow',                type:'Trigger: State Change → Review',status:'Active', runs:'23 / day'  },
+        { name:'SLA Breach Notification — Slack + Email',    type:'Trigger: SLA Breach Event',     status:'Active', runs:'12 / day'  },
+        { name:'CMDB Discovery → CI Reconciliation',         type:'Scheduled: Every 6h',           status:'Active', runs:'4 / day'   },
+        { name:'KB Article Expiry Review',                   type:'Scheduled: Weekly',             status:'Active', runs:'1 / week'  },
+        { name:'Prometheus Alert → SN Incident (IH Spoke)',  type:'Trigger: Webhook POST',         status:'Active', runs:'31 / day'  },
+      ];
+      document.getElementById('flow-list').innerHTML = flows.map(f => `
+        <div class="flow-item">
+          <span class="badge badge-green">Active</span>
+          <span class="flow-item-name">${f.name}</span>
+          <span class="flow-item-meta">${f.type}</span>
+          <span class="flow-item-meta" style="margin-left:auto">${f.runs}</span>
+        </div>`).join('');
+    },
+  };
+})();
+
+
+/*
+  ============================================================
+  MODULE 6: NAVIGATION
+  ─────────────────────────────────────────────────────────────
+  Handles single-page navigation between the five panels.
+  Updates the topbar route display and active nav item.
+  Does NOT reload data — rendering uses the cached snapshot.
+  ============================================================
+*/
+
+/**
+ * navigateTo(navItem)
+ * Called by nav item onclick. Switches the active page, updates topbar,
+ * and marks the nav item as active.
+ *
+ * @param {HTMLElement} navItem - the clicked .nav-item element
+ */
+function navigateTo(navItem) {
+  // Deactivate all pages + nav items
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  // Activate selected page
+  const pageId = navItem.dataset.page;
+  const page = document.getElementById('page-' + pageId);
+  if (page) page.classList.add('active');
+
+  // Activate nav item
+  navItem.classList.add('active');
+
+  // Update topbar
+  const titles = {
+    'overview':         'Dashboard Overview',
+    'incident-response':'Incident Response',
+    'code-review':      'Code Review / Change Management',
+    'documentation':    'Documentation / Knowledge Base',
+    'architecture':     'Architecture & Debug',
+    'integrations':     'Grafana & Power BI Integrations',
+  };
+  document.getElementById('topbar-title').textContent = titles[pageId] || pageId;
+  document.getElementById('topbar-route').textContent = navItem.dataset.route || '';
+}
+
+
+/*
+  ============================================================
+  BOOTSTRAP
+  ─────────────────────────────────────────────────────────────
+  Kicks off the application when the DOM is ready.
+  Order: DataLayer.init() → DashboardEngine.renderAll() → done.
+
+  To run with live ServiceNow data:
+    1. Set MOCK_MODE = false in DataLayer above.
+    2. Fill SN_CONFIG.instanceUrl, username, password.
+    3. Start a local server: python3 -m http.server 3000
+    4. Add CORS rule in PDI for http://localhost:3000.
+    5. Open http://localhost:3000.
+  ============================================================
+*/
+document.addEventListener('DOMContentLoaded', async () => {
+  console.info('[Dashboard] ServiceNow Performance Analyst Dashboard v1.0.0');
+  console.info('[Dashboard] Author: Suman M · LTIMindtree · AU PDI');
+  console.info('[Dashboard] Stack: Vanilla JS · Chart.js · Claude AI (Anthropic)');
+  console.info('[Dashboard] Set MOCK_MODE=false + SN_CONFIG credentials for live data.');
+
+  await DataLayer.init();
+  DashboardEngine.renderAll(DataLayer.getSnapshot());
+
+  // Auto-refresh data every SN_CONFIG.pollIntervalSeconds
+  setInterval(() => DataLayer.refresh(), SN_CONFIG.pollIntervalSeconds * 1000);
+
+  // Auto-refresh AI analysis every AI_CONFIG.autoRefreshMs
+  // Uncomment to enable automatic periodic AI re-analysis:
+  // setInterval(() => AIEngine.analyze(), AI_CONFIG.autoRefreshMs);
+});
+</script>
+
+</body>
+</html>
